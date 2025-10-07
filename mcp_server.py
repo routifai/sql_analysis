@@ -9,8 +9,9 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 from decimal import Decimal
+import hashlib
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -28,6 +29,7 @@ load_dotenv()
 DB_CONNECTION = os.getenv("DB_CONNECTION_STRING")
 CATALOG_PATH = os.getenv("CATALOG_PATH", "database_catalog.md")
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+ENABLE_QUERY_CACHE = os.getenv("ENABLE_QUERY_CACHE", "true").lower() == "true"
 
 # Logging
 logging.basicConfig(
@@ -54,6 +56,57 @@ if Path(CATALOG_PATH).exists():
     logger.info(f"✅ Loaded catalog: {len(catalog_content)} chars")
 else:
     logger.warning(f"⚠️ Catalog not found: {CATALOG_PATH}")
+
+# ============================================================================
+# Query Cache (Simple in-memory for POC)
+# ============================================================================
+
+query_cache = {}  # {query_hash: {sql, success, results, timestamp}}
+
+def cache_query(query: str, sql: str, success: bool, results: Dict = None):
+    """Cache successful queries for reuse"""
+    if not ENABLE_QUERY_CACHE:
+        return
+    
+    query_hash = hashlib.md5(query.lower().strip().encode()).hexdigest()
+    query_cache[query_hash] = {
+        'query': query,
+        'sql': sql,
+        'success': success,
+        'results': results if success else None,
+        'timestamp': datetime.now().isoformat()
+    }
+    logger.info(f"📦 Cached query: {query[:50]}...")
+
+def get_cached_query(query: str) -> Dict | None:
+    """Check if query was already solved"""
+    if not ENABLE_QUERY_CACHE:
+        return None
+    
+    query_hash = hashlib.md5(query.lower().strip().encode()).hexdigest()
+    cached = query_cache.get(query_hash)
+    
+    if cached and cached['success']:
+        logger.info(f"🎯 Cache hit for: {query[:50]}...")
+        return cached
+    
+    return None
+
+# ============================================================================
+# Relationship Map (Define your schema relationships)
+# ============================================================================
+
+# TODO: Update this based on YOUR actual database schema
+RELATIONSHIP_MAP = """
+TABLE RELATIONSHIPS:
+- users.user_id → usage_records.user_id (1:N - one user has many usage records)
+- users.lob → lob_summary.lob_name (N:1 - many users per LOB)
+
+IMPORTANT JOIN PATTERNS:
+- To get user activity: JOIN users u WITH usage_records ur ON u.user_id = ur.user_id
+- To get LOB details: JOIN users u WITH lob_summary ls ON u.lob = ls.lob_name
+- For user activity by LOB: users → usage_records → group by users.lob
+"""
 
 # ============================================================================
 # Utilities
@@ -138,25 +191,83 @@ def execute_sql(sql: str) -> Dict[str, Any]:
 
 
 # ============================================================================
-# LLM Functions
+# Two-Stage SQL Generation with Chain-of-Thought
 # ============================================================================
 
-async def generate_sql(user_query: str, catalog: str) -> str:
-    """Generate SQL using shared LLM client"""
+async def generate_query_plan(user_query: str, catalog: str, ctx: Context = None) -> str:
+    """
+    Stage 1: Generate reasoning plan (Chain-of-Thought)
+    """
     
-    prompt = f"""You are a PostgreSQL expert. Generate a SQL query for this question.
+    if ctx:
+        await ctx.info("🧠 Stage 1: Generating query plan...")
+    
+    prompt = f"""You are a SQL query planner. Break down how to answer this question using the database.
 
 DATABASE SCHEMA:
 {catalog}
 
-RULES:
-- Return ONLY the SQL query, no explanations
-- Use proper JOINs when needed
-- Use table aliases (e.g., users u)
-- Column names are case-sensitive
-- Do NOT add LIMIT unless user asks for it
+{RELATIONSHIP_MAP}
 
 USER QUESTION: {user_query}
+
+INSTRUCTIONS:
+Think step-by-step and create a query plan. Include:
+1. Which tables are needed
+2. What columns to select
+3. How to join tables (use relationship map)
+4. What filters to apply
+5. Any aggregations needed
+6. Sort order if relevant
+
+Return your plan as a numbered list. Be specific about table names and columns.
+
+QUERY PLAN:"""
+    
+    response = llm_client.client.chat.completions.create(
+        model=llm_client.model,
+        max_tokens=1500,
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    
+    plan = response.choices[0].message.content.strip()
+    logger.info(f"📋 Query Plan:\n{plan}")
+    
+    return plan
+
+
+async def generate_sql_from_plan(
+    user_query: str,
+    plan: str,
+    catalog: str,
+    ctx: Context = None
+) -> str:
+    """
+    Stage 2: Generate SQL based on the reasoning plan
+    """
+    
+    if ctx:
+        await ctx.info("⚙️ Stage 2: Generating SQL from plan...")
+    
+    prompt = f"""You are a PostgreSQL expert. Generate SQL based on this query plan.
+
+DATABASE SCHEMA:
+{catalog}
+
+{RELATIONSHIP_MAP}
+
+USER QUESTION: {user_query}
+
+QUERY PLAN:
+{plan}
+
+INSTRUCTIONS:
+- Follow the plan exactly
+- Use proper JOIN syntax based on relationships
+- Use table aliases (e.g., users u, usage_records ur)
+- Column names are case-sensitive
+- Return ONLY the SQL query, no explanations
 
 SQL:"""
     
@@ -170,19 +281,37 @@ SQL:"""
     sql = response.choices[0].message.content.strip()
     sql = sql.replace('```sql', '').replace('```', '').strip()
     
-    logger.info(f"Generated SQL: {sql[:100]}...")
+    logger.info(f"🔧 Generated SQL: {sql[:150]}...")
+    
     return sql
 
 
-async def fix_sql(user_query: str, failed_sql: str, error: str, catalog: str) -> str:
-    """Fix SQL based on error"""
+async def fix_sql_with_context(
+    user_query: str,
+    plan: str,
+    failed_sql: str,
+    error: str,
+    catalog: str,
+    ctx: Context = None
+) -> str:
+    """
+    Fix SQL with context from original plan
+    """
     
-    prompt = f"""Fix this SQL query that failed with an error.
+    if ctx:
+        await ctx.info("🔧 Fixing SQL with plan context...")
+    
+    prompt = f"""Fix this SQL query that failed.
 
 DATABASE SCHEMA:
 {catalog}
 
+{RELATIONSHIP_MAP}
+
 ORIGINAL QUESTION: {user_query}
+
+QUERY PLAN (your reasoning):
+{plan}
 
 FAILED SQL:
 {failed_sql}
@@ -191,8 +320,10 @@ ERROR:
 {error}
 
 INSTRUCTIONS:
-- Analyze the error carefully
-- Fix the SQL to resolve the error
+- The plan is correct, but SQL has an error
+- Fix the SQL based on the error message
+- Keep following the original plan
+- Common issues: wrong column names, missing JOINs, type mismatches
 - Return ONLY the corrected SQL
 
 FIXED SQL:"""
@@ -207,7 +338,8 @@ FIXED SQL:"""
     fixed_sql = response.choices[0].message.content.strip()
     fixed_sql = fixed_sql.replace('```sql', '').replace('```', '').strip()
     
-    logger.info(f"Fixed SQL: {fixed_sql[:100]}...")
+    logger.info(f"🔧 Fixed SQL: {fixed_sql[:150]}...")
+    
     return fixed_sql
 
 
@@ -220,23 +352,25 @@ async def text_to_sql(
     query: str,
     execute: bool = True,
     limit: int = 100,
+    use_cache: bool = True,
     ctx: Context = None
 ) -> str:
     """
-    Convert natural language to SQL and execute it with auto-retry.
+    Convert natural language to SQL with two-stage reasoning and auto-retry.
+    
+    This version uses Chain-of-Thought reasoning:
+    1. First generates a query plan (which tables, joins, filters)
+    2. Then generates SQL based on that plan
+    3. If errors occur, fixes SQL while maintaining the plan
     
     Args:
-        query: Your question in natural language (e.g., "Show top 10 users by usage time")
+        query: Your question in natural language
         execute: Whether to execute the SQL (default: True)
         limit: Maximum rows to return (default: 100)
+        use_cache: Check cache for similar queries (default: True)
     
     Returns:
-        JSON with SQL, results, and metadata
-    
-    Examples:
-        - "How many users are in Finance?"
-        - "Top 5 features by usage count"
-        - "Average session duration by department"
+        JSON with plan, SQL, results, and metadata
     """
     
     if ctx:
@@ -245,21 +379,40 @@ async def text_to_sql(
     start_time = datetime.now()
     
     try:
-        # Generate SQL
-        if ctx:
-            await ctx.info("🤖 Generating SQL with Claude...")
+        # Check cache first
+        if use_cache and execute:
+            cached = get_cached_query(query)
+            if cached:
+                if ctx:
+                    await ctx.info("🎯 Using cached result!")
+                
+                return json.dumps({
+                    'query': query,
+                    'sql': cached['sql'],
+                    'success': True,
+                    'cached': True,
+                    'columns': cached['results']['columns'] if cached['results'] else [],
+                    'rows': (cached['results']['rows'][:limit] if cached['results'] else []),
+                    'row_count': len(cached['results']['rows'][:limit]) if cached['results'] else 0,
+                    'total_time': 0.001  # Instant from cache
+                }, indent=2, default=str)
         
-        sql = await generate_sql(query, catalog_content)
+        # Stage 1: Generate query plan
+        plan = await generate_query_plan(query, catalog_content, ctx)
+        
+        # Stage 2: Generate SQL from plan
+        sql = await generate_sql_from_plan(query, plan, catalog_content, ctx)
         
         if not execute:
             return json.dumps({
                 'query': query,
+                'plan': plan,
                 'sql': sql,
                 'executed': False,
                 'total_time': (datetime.now() - start_time).total_seconds()
             }, indent=2)
         
-        # Execute with retry
+        # Execute with retry (now with plan context)
         current_sql = sql
         
         for attempt in range(MAX_RETRIES):
@@ -275,14 +428,17 @@ async def text_to_sql(
                 if attempt == MAX_RETRIES - 1:
                     return json.dumps({
                         'query': query,
+                        'plan': plan,
                         'sql': current_sql,
                         'success': False,
                         'error': f"Validation error: {error_msg}",
                         'attempts': attempt + 1
                     }, indent=2)
                 
-                # Try to fix
-                current_sql = await fix_sql(query, current_sql, error_msg, catalog_content)
+                # Fix with plan context
+                current_sql = await fix_sql_with_context(
+                    query, plan, current_sql, error_msg, catalog_content, ctx
+                )
                 continue
             
             # Execute
@@ -290,12 +446,19 @@ async def text_to_sql(
             
             if result['success']:
                 if ctx:
-                    await ctx.info(f"✅ Success! {result['row_count']} rows in {result['execution_time']:.2f}s")
+                    await ctx.info(
+                        f"✅ Success! {result['row_count']} rows in {result['execution_time']:.2f}s"
+                    )
+                
+                # Cache successful query
+                cache_query(query, result['sql'], True, result)
                 
                 response = {
                     'query': query,
+                    'plan': plan,
                     'sql': result['sql'],
                     'success': True,
+                    'cached': False,
                     'columns': result['columns'],
                     'rows': result['rows'][:limit],
                     'row_count': min(result['row_count'], limit),
@@ -314,20 +477,24 @@ async def text_to_sql(
             if attempt == MAX_RETRIES - 1:
                 return json.dumps({
                     'query': query,
+                    'plan': plan,
                     'sql': result['sql'],
                     'success': False,
                     'error': result['error'],
                     'attempts': attempt + 1
                 }, indent=2)
             
-            # Fix and retry
+            # Fix with plan context
             if ctx:
-                await ctx.info("🔧 Attempting to fix SQL...")
+                await ctx.info("🔧 Attempting to fix SQL with plan context...")
             
-            current_sql = await fix_sql(query, current_sql, result['error'], catalog_content)
+            current_sql = await fix_sql_with_context(
+                query, plan, current_sql, result['error'], catalog_content, ctx
+            )
         
         return json.dumps({
             'query': query,
+            'plan': plan,
             'success': False,
             'error': 'Max retries exceeded',
             'attempts': MAX_RETRIES
@@ -353,6 +520,27 @@ async def get_schema() -> str:
 
 
 @mcp.tool()
+async def get_cache_stats() -> str:
+    """Get query cache statistics"""
+    total = len(query_cache)
+    successful = sum(1 for q in query_cache.values() if q['success'])
+    
+    return json.dumps({
+        'cache_enabled': ENABLE_QUERY_CACHE,
+        'total_cached_queries': total,
+        'successful_queries': successful,
+        'cache_size_mb': len(str(query_cache)) / 1024 / 1024
+    }, indent=2)
+
+
+@mcp.tool()
+async def clear_cache() -> str:
+    """Clear the query cache"""
+    query_cache.clear()
+    return json.dumps({'message': 'Cache cleared', 'success': True}, indent=2)
+
+
+@mcp.tool()
 async def health() -> str:
     """Check server health"""
     
@@ -372,7 +560,14 @@ async def health() -> str:
         'database': 'healthy' if db_ok else 'unhealthy',
         'catalog_loaded': len(catalog_content) > 100,
         'model': llm_client.model,
-        'max_retries': MAX_RETRIES
+        'max_retries': MAX_RETRIES,
+        'cache_enabled': ENABLE_QUERY_CACHE,
+        'cached_queries': len(query_cache),
+        'features': {
+            'two_stage_reasoning': True,
+            'relationship_hints': True,
+            'query_caching': ENABLE_QUERY_CACHE
+        }
     }, indent=2)
 
 
@@ -382,10 +577,12 @@ async def health() -> str:
 
 if __name__ == "__main__":
     logger.info("=" * 80)
-    logger.info("🚀 Text-to-SQL MCP Server")
+    logger.info("🚀 Text-to-SQL MCP Server v2.0 (Two-Stage Reasoning)")
     logger.info(f"🤖 Model: {llm_client.model}")
     logger.info(f"📄 Catalog: {CATALOG_PATH} ({len(catalog_content)} chars)")
     logger.info(f"🔄 Max Retries: {MAX_RETRIES}")
+    logger.info(f"💾 Query Cache: {'Enabled' if ENABLE_QUERY_CACHE else 'Disabled'}")
+    logger.info(f"🧠 Features: Two-Stage Reasoning + Relationship Hints")
     logger.info("=" * 80)
     
     try:
