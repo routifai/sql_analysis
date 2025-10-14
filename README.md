@@ -102,24 +102,34 @@ MAX_RETRIES=5
 ENABLE_QUERY_CACHE=true
 ```
 
-### 4. Configure Backend Environment
+### 4. Configure Onboarding System
+
+Create a single `.env` file for both frontend and backend:
 
 ```bash
-cd onboarding_DB/backend
+cd onboarding_DB
 cp env.example .env
 ```
 
-Edit `.env` and configure your admin database connection:
+Edit `.env` and configure your settings:
 
 ```env
+# Backend Configuration
 ADMIN_DB_CONNECTION=postgresql://testuser:testpass@localhost:5432/onboarding_admin
 API_PORT=8001
 LOG_LEVEL=INFO
+
+# Frontend Configuration
+NEXT_PUBLIC_API_URL=http://localhost:8001
+PORT=3001
 ```
+
+**Note:** This single `.env` file is used by both the frontend and backend.
 
 ### 5. Setup Admin Database
 
 ```bash
+cd backend
 python setup_admin_db.py
 cd ../..
 ```

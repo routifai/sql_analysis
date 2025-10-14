@@ -18,8 +18,10 @@ from datetime import datetime
 
 from catalog_extractor import CatalogExtractor
 
-# Load environment variables first
-load_dotenv()
+# Load environment variables from parent directory (onboarding_DB/.env)
+# This allows sharing .env between frontend and backend
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+load_dotenv(dotenv_path=env_path)
 
 # Get log level from environment (default to INFO if not set or invalid)
 LOG_LEVEL_ENV = os.getenv("LOG_LEVEL", "INFO").upper()

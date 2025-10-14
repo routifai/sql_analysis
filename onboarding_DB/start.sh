@@ -17,15 +17,16 @@ echo "✅ PostgreSQL is running"
 # Note: If you haven't set up the admin database yet, run:
 # cd backend && python setup_admin_db.py
 
-# Check if backend .env exists
-cd backend
+# Check if .env exists in onboarding_DB root
 if [ ! -f ".env" ]; then
-    echo "⚠️  Backend .env file not found"
+    echo "⚠️  .env file not found"
     echo "Creating .env from env.example..."
     if [ -f "env.example" ]; then
         cp env.example .env
         echo "✅ Created .env file"
-        echo "📝 Please edit backend/.env with your database connection"
+        echo "📝 Please edit .env with your configuration:"
+        echo "   - ADMIN_DB_CONNECTION (backend database)"
+        echo "   - NEXT_PUBLIC_API_URL (frontend API URL)"
         echo ""
         read -p "Press Enter after configuring .env (or Ctrl+C to exit)..."
     else
@@ -35,6 +36,7 @@ if [ ! -f ".env" ]; then
 fi
 
 # Start backend in background
+cd backend
 echo ""
 echo "🔧 Starting backend API (port 8001)..."
 python api_server.py &
@@ -61,6 +63,12 @@ done
 echo ""
 echo "🎨 Starting frontend (port 3001)..."
 cd ../frontend
+
+# Copy .env to frontend directory (Next.js expects it in project root)
+if [ -f "../.env" ]; then
+    cp ../.env .env.local
+    echo "✅ Copied .env to frontend"
+fi
 
 # Check if node_modules exists
 if [ ! -d "node_modules" ]; then

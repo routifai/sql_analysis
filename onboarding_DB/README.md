@@ -28,34 +28,69 @@ Multi-tenant onboarding system for Text2SQL. Users connect their PostgreSQL data
 
 ## Quick Start
 
-### 1. Setup Admin Database
+### 1. Configure Environment
+
+Copy the example environment file and configure it:
+
+```bash
+cd onboarding_DB
+cp env.example .env
+```
+
+Edit `.env` with your configuration:
+
+```env
+# Backend Configuration
+ADMIN_DB_CONNECTION=postgresql://testuser:testpass@localhost:5432/onboarding_admin
+API_PORT=8001
+LOG_LEVEL=INFO
+
+# Frontend Configuration
+NEXT_PUBLIC_API_URL=http://localhost:8001
+PORT=3001
+```
+
+**Note:** This single `.env` file is used by both frontend and backend.
+
+### 2. Setup Admin Database
 
 ```bash
 cd backend
 python setup_admin_db.py
+cd ..
 ```
 
 This creates the `onboarding_admin` database with the required schema.
 
-### 2. Start Backend API
+### 3. Start the System
 
+Use the convenient startup script:
+
+```bash
+./start.sh
+```
+
+This will:
+- Check PostgreSQL is running
+- Create `.env` from `env.example` if needed
+- Start the backend API at `http://localhost:8001`
+- Start the frontend at `http://localhost:3001`
+
+Or start services manually:
+
+**Backend:**
 ```bash
 cd backend
 pip install -r requirements.txt
 python api_server.py
 ```
 
-Backend will run at: `http://localhost:8001`
-
-### 3. Start Frontend
-
+**Frontend:**
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-
-Frontend will run at: `http://localhost:3001`
 
 ## Database Schema
 
