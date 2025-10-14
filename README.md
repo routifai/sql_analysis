@@ -116,6 +116,8 @@ Edit `.env` and configure your settings:
 ```env
 # Backend Configuration
 ADMIN_DB_CONNECTION=postgresql://testuser:testpass@localhost:5432/onboarding_admin
+USER_CONNECTIONS_TABLE=db_connection_infos
+AUDIT_LOG_TABLE=onboarding_audit_log
 API_PORT=8001
 LOG_LEVEL=INFO
 

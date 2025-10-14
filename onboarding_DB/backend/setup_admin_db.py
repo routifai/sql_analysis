@@ -10,7 +10,13 @@ import os
 import sys
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment variables from parent directory (onboarding_DB/.env)
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+load_dotenv(dotenv_path=env_path)
+
+# Get configurable table names
+USER_CONNECTIONS_TABLE = os.getenv("USER_CONNECTIONS_TABLE", "db_connection_infos")
+AUDIT_LOG_TABLE = os.getenv("AUDIT_LOG_TABLE", "onboarding_audit_log")
 
 def setup_admin_database():
     """Create admin database and tables"""
@@ -125,15 +131,48 @@ def setup_admin_database():
         
         cursor = conn.cursor()
         
-        # Read and execute schema
-        schema_path = os.path.join(os.path.dirname(__file__), 'database_schema.sql')
-        with open(schema_path, 'r') as f:
-            schema_sql = f.read()
+        # Create tables using configurable names
+        schema_sql = f"""
+-- Admin Database Schema with configurable table names
+-- User connections and catalog information
+CREATE TABLE IF NOT EXISTS {USER_CONNECTIONS_TABLE} (
+    id SERIAL PRIMARY KEY,
+    user_email TEXT UNIQUE NOT NULL,
+    db_type TEXT NOT NULL DEFAULT 'postgres',
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 5432,
+    db_user TEXT NOT NULL,
+    db_password TEXT NOT NULL,  -- In production, encrypt this
+    db_name TEXT NOT NULL,
+    catalog_markdown TEXT,  -- Store the generated catalog
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    last_query_at TIMESTAMP,
+    status TEXT DEFAULT 'active'
+);
+
+-- Index for faster lookups
+CREATE INDEX IF NOT EXISTS idx_{USER_CONNECTIONS_TABLE}_user_email ON {USER_CONNECTIONS_TABLE}(user_email);
+CREATE INDEX IF NOT EXISTS idx_{USER_CONNECTIONS_TABLE}_status ON {USER_CONNECTIONS_TABLE}(status);
+
+-- Audit log for tracking
+CREATE TABLE IF NOT EXISTS {AUDIT_LOG_TABLE} (
+    id SERIAL PRIMARY KEY,
+    user_email TEXT,
+    action TEXT,  -- 'onboard', 'catalog_update', 'query', etc.
+    details JSONB,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_{AUDIT_LOG_TABLE}_email ON {AUDIT_LOG_TABLE}(user_email);
+"""
         
         cursor.execute(schema_sql)
         conn.commit()
         
         print("✅ Created tables in onboarding_admin")
+        print(f"   - User connections table: {USER_CONNECTIONS_TABLE}")
+        print(f"   - Audit log table: {AUDIT_LOG_TABLE}")
         
         # Grant permissions on tables
         cursor.execute("""

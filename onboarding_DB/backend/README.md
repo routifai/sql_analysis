@@ -27,6 +27,8 @@ Edit `onboarding_DB/.env` and set your configuration:
 ```env
 # Backend Configuration
 ADMIN_DB_CONNECTION=postgresql://testuser:testpass@localhost:5432/onboarding_admin
+USER_CONNECTIONS_TABLE=db_connection_infos
+AUDIT_LOG_TABLE=onboarding_audit_log
 API_PORT=8001
 ENVIRONMENT=development
 LOG_LEVEL=INFO
@@ -76,6 +78,8 @@ API documentation:
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `ADMIN_DB_CONNECTION` | PostgreSQL connection string for admin DB | `postgresql://testuser:testpass@localhost:5432/onboarding_admin` | Yes |
+| `USER_CONNECTIONS_TABLE` | Table name for user connections | `db_connection_infos` | No |
+| `AUDIT_LOG_TABLE` | Table name for audit logging | `onboarding_audit_log` | No |
 | `API_PORT` | Port for the API server | `8001` | No |
 | `ENVIRONMENT` | Environment (development/staging/production) | `development` | No |
 | `LOG_LEVEL` | Logging level (DEBUG/INFO/WARNING/ERROR) | `INFO` | No |

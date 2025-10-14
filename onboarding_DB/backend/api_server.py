@@ -54,6 +54,10 @@ ADMIN_DB = os.getenv("ADMIN_DB_CONNECTION", "postgresql://testuser:testpass@loca
 API_PORT = int(os.getenv("API_PORT", "8001"))
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
+# Database table names (configurable)
+USER_CONNECTIONS_TABLE = os.getenv("USER_CONNECTIONS_TABLE", "db_connection_infos")
+AUDIT_LOG_TABLE = os.getenv("AUDIT_LOG_TABLE", "onboarding_audit_log")
+
 # ============================================================================
 # Pydantic Models
 # ============================================================================
@@ -138,8 +142,8 @@ def log_audit(user_email: str, action: str, details: dict = None):
     try:
         conn = get_admin_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO onboarding_audit_log (user_email, action, details)
+        cursor.execute(f"""
+            INSERT INTO {AUDIT_LOG_TABLE} (user_email, action, details)
             VALUES (%s, %s, %s)
         """, (user_email, action, psycopg2.extras.Json(details or {})))
         conn.commit()
@@ -365,8 +369,8 @@ async def save_onboarding(request: CatalogSaveRequest):
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Insert or update user information
-        cursor.execute("""
-            INSERT INTO db_connection_infos (
+        cursor.execute(f"""
+            INSERT INTO {USER_CONNECTIONS_TABLE} (
                 user_email, db_type, host, port, db_user, db_password, 
                 db_name, catalog_markdown, updated_at
             )
@@ -426,9 +430,9 @@ async def check_user_status(email: str):
         conn = get_admin_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT user_email, created_at, updated_at, status, last_query_at, db_type, host, db_name
-            FROM db_connection_infos
+            FROM {USER_CONNECTIONS_TABLE}
             WHERE user_email = %s
         """, (email,))
         
@@ -467,9 +471,9 @@ async def get_user_info(email: str):
         conn = get_admin_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT *
-            FROM db_connection_infos
+            FROM {USER_CONNECTIONS_TABLE}
             WHERE user_email = %s AND status = 'active'
         """, (email,))
         
@@ -477,8 +481,8 @@ async def get_user_info(email: str):
         
         if user:
             # Update last_query_at
-            cursor.execute("""
-                UPDATE db_connection_infos
+            cursor.execute(f"""
+                UPDATE {USER_CONNECTIONS_TABLE}
                 SET last_query_at = NOW()
                 WHERE user_email = %s
             """, (email,))
@@ -520,6 +524,8 @@ if __name__ == "__main__":
     logger.info("🚀 Text2SQL Onboarding API Server")
     logger.info(f"🌍 Environment: {ENVIRONMENT}")
     logger.info(f"📊 Admin DB: {ADMIN_DB}")
+    logger.info(f"📋 User Table: {USER_CONNECTIONS_TABLE}")
+    logger.info(f"📝 Audit Table: {AUDIT_LOG_TABLE}")
     logger.info(f"🔍 Log Level: {LOG_LEVEL_ENV}")
     logger.info(f"🌐 Server: http://0.0.0.0:{API_PORT}")
     logger.info(f"📖 Docs: http://0.0.0.0:{API_PORT}/docs")
