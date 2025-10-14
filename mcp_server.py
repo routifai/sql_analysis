@@ -26,10 +26,16 @@ from llm_client import get_llm_client
 load_dotenv()
 
 # Configuration
-DB_CONNECTION = os.getenv("DB_CONNECTION_STRING")
+DB_CONNECTION = os.getenv("DB_CONNECTION_STRING")  # Legacy fallback
+ADMIN_DB_CONNECTION = os.getenv("ADMIN_DB_CONNECTION", "postgresql://testuser:testpass@localhost:5432/onboarding_admin")
 CATALOG_PATH = os.getenv("CATALOG_PATH", "database_catalog.md")
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 ENABLE_QUERY_CACHE = os.getenv("ENABLE_QUERY_CACHE", "true").lower() == "true"
+REQUIRE_EMAIL_AUTH = os.getenv("REQUIRE_EMAIL_AUTH", "true").lower() == "true"
+
+# Default user email (for development/testing)
+# Set this to your email if you don't want to pass it with every request
+DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "abc@gmail.com")
 
 # Logging
 logging.basicConfig(
@@ -39,14 +45,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Validate config
-if not DB_CONNECTION:
-    logger.error("❌ Missing DB_CONNECTION_STRING")
-    exit(1)
+if REQUIRE_EMAIL_AUTH:
+    if not ADMIN_DB_CONNECTION:
+        logger.error("❌ Missing ADMIN_DB_CONNECTION for email authentication")
+        exit(1)
+    logger.info("✅ Email authentication ENABLED")
+else:
+    if not DB_CONNECTION:
+        logger.error("❌ Missing DB_CONNECTION_STRING")
+        exit(1)
+    logger.info("⚠️ Email authentication DISABLED - using legacy mode")
 
 # Initialize
 mcp = FastMCP("text2sql")
 llm_client = get_llm_client()
-db_pool = SimpleConnectionPool(2, 10, DB_CONNECTION)
+
+# Database pools - admin DB for user lookup
+admin_db_pool = None
+if REQUIRE_EMAIL_AUTH:
+    admin_db_pool = SimpleConnectionPool(2, 10, ADMIN_DB_CONNECTION)
+
+# Legacy pool (only used if email auth is disabled)
+db_pool = None
+if not REQUIRE_EMAIL_AUTH and DB_CONNECTION:
+    db_pool = SimpleConnectionPool(2, 10, DB_CONNECTION)
 
 # Load catalog
 catalog_content = ""
@@ -56,6 +78,76 @@ if Path(CATALOG_PATH).exists():
     logger.info(f"✅ Loaded catalog: {len(catalog_content)} chars")
 else:
     logger.warning(f"⚠️ Catalog not found: {CATALOG_PATH}")
+
+# ============================================================================
+# User Database Connection Management
+# ============================================================================
+
+user_db_pools = {}  # {user_email: connection_pool}
+
+def get_user_info(user_email: str) -> Dict[str, Any] | None:
+    """
+    Fetch user's database connection info and catalog from admin database.
+    Returns None if user not found or not active.
+    """
+    if not REQUIRE_EMAIL_AUTH:
+        return None
+    
+    conn = None
+    cursor = None
+    try:
+        conn = admin_db_pool.getconn()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT user_email, db_type, host, port, db_user, db_password, 
+                   db_name, catalog_markdown, status
+            FROM db_connection_infos
+            WHERE user_email = %s AND status = 'active'
+        """, (user_email,))
+        
+        user = cursor.fetchone()
+        
+        if user:
+            # Update last_query_at
+            cursor.execute("""
+                UPDATE db_connection_infos
+                SET last_query_at = NOW()
+                WHERE user_email = %s
+            """, (user_email,))
+            conn.commit()
+            
+            return dict(user)
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error fetching user info for {user_email}: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            admin_db_pool.putconn(conn)
+
+def get_user_connection_pool(user_email: str, user_info: Dict[str, Any]) -> SimpleConnectionPool:
+    """
+    Get or create a connection pool for the user's database.
+    """
+    if user_email in user_db_pools:
+        return user_db_pools[user_email]
+    
+    # Build connection string
+    connection_string = f"postgresql://{user_info['db_user']}:{user_info['db_password']}@{user_info['host']}:{user_info['port']}/{user_info['db_name']}"
+    
+    try:
+        pool = SimpleConnectionPool(1, 5, connection_string)
+        user_db_pools[user_email] = pool
+        logger.info(f"✅ Created connection pool for user: {user_email}")
+        return pool
+    except Exception as e:
+        logger.error(f"❌ Failed to create connection pool for {user_email}: {e}")
+        raise
 
 # ============================================================================
 # Query Cache (Simple in-memory for POC)
@@ -143,18 +235,29 @@ def validate_sql(sql: str) -> tuple[bool, str]:
     return True, ""
 
 
-def execute_sql(sql: str) -> Dict[str, Any]:
-    """Execute SQL query"""
+def execute_sql(sql: str, connection_pool: SimpleConnectionPool = None) -> Dict[str, Any]:
+    """Execute SQL query using specified connection pool"""
     sql_clean = sql.strip().rstrip(';')
     if 'LIMIT' not in sql_clean.upper():
         sql_clean += " LIMIT 1000"
+    
+    # Use provided pool or fall back to legacy global pool
+    pool = connection_pool if connection_pool else db_pool
+    
+    if not pool:
+        return {
+            'success': False,
+            'sql': sql_clean,
+            'error': 'No database connection available',
+            'execution_time': 0
+        }
     
     conn = None
     cursor = None
     start = datetime.now()
     
     try:
-        conn = db_pool.getconn()
+        conn = pool.getconn()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("SET statement_timeout = 30000")
         cursor.execute(sql_clean)
@@ -187,7 +290,7 @@ def execute_sql(sql: str) -> Dict[str, Any]:
         if cursor:
             cursor.close()
         if conn:
-            db_pool.putconn(conn)
+            pool.putconn(conn)
 
 
 # ============================================================================
@@ -350,6 +453,7 @@ FIXED SQL:"""
 @mcp.tool()
 async def text_to_sql(
     query: str,
+    user_email: str = None,
     execute: bool = True,
     limit: int = 100,
     use_cache: bool = True,
@@ -365,6 +469,7 @@ async def text_to_sql(
     
     Args:
         query: Your question in natural language
+        user_email: Your email address (optional - uses default if not provided)
         execute: Whether to execute the SQL (default: True)
         limit: Maximum rows to return (default: 100)
         use_cache: Check cache for similar queries (default: True)
@@ -373,10 +478,70 @@ async def text_to_sql(
         JSON with plan, SQL, results, and metadata
     """
     
+    # Use default email if none provided
+    if not user_email and DEFAULT_USER_EMAIL:
+        user_email = DEFAULT_USER_EMAIL
+        if ctx:
+            await ctx.info(f"📧 Using default user: {user_email}")
+    
     if ctx:
         await ctx.info(f"📝 Query: {query[:100]}...")
+        await ctx.info(f"👤 User: {user_email}")
     
     start_time = datetime.now()
+    
+    # ============================================================================
+    # Authentication & User Setup
+    # ============================================================================
+    
+    user_catalog = catalog_content  # Default to global catalog
+    user_pool = db_pool  # Default to global pool
+    
+    if REQUIRE_EMAIL_AUTH:
+        if not user_email:
+            return json.dumps({
+                'success': False,
+                'error': 'user_email is required when email authentication is enabled',
+                'query': query
+            }, indent=2)
+        
+        # Fetch user info
+        if ctx:
+            await ctx.info(f"🔐 Authenticating user: {user_email}")
+        
+        user_info = get_user_info(user_email)
+        
+        if not user_info:
+            if ctx:
+                await ctx.error(f"❌ User not found or inactive: {user_email}")
+            
+            return json.dumps({
+                'success': False,
+                'error': f'User {user_email} not found or not active. Please complete onboarding first.',
+                'query': query,
+                'user_email': user_email
+            }, indent=2)
+        
+        # Use user's catalog
+        user_catalog = user_info.get('catalog_markdown', catalog_content)
+        if not user_catalog:
+            user_catalog = catalog_content  # Fallback to global
+        
+        # Get user's database connection pool
+        try:
+            user_pool = get_user_connection_pool(user_email, user_info)
+            if ctx:
+                await ctx.info(f"✅ Authenticated: {user_email} → {user_info['db_name']}")
+        except Exception as e:
+            if ctx:
+                await ctx.error(f"❌ Failed to connect to user database: {e}")
+            
+            return json.dumps({
+                'success': False,
+                'error': f'Failed to connect to your database: {str(e)}',
+                'query': query,
+                'user_email': user_email
+            }, indent=2)
     
     try:
         # Check cache first
@@ -398,10 +563,10 @@ async def text_to_sql(
                 }, indent=2, default=str)
         
         # Stage 1: Generate query plan
-        plan = await generate_query_plan(query, catalog_content, ctx)
+        plan = await generate_query_plan(query, user_catalog, ctx)
         
         # Stage 2: Generate SQL from plan
-        sql = await generate_sql_from_plan(query, plan, catalog_content, ctx)
+        sql = await generate_sql_from_plan(query, plan, user_catalog, ctx)
         
         if not execute:
             return json.dumps({
@@ -437,12 +602,12 @@ async def text_to_sql(
                 
                 # Fix with plan context
                 current_sql = await fix_sql_with_context(
-                    query, plan, current_sql, error_msg, catalog_content, ctx
+                    query, plan, current_sql, error_msg, user_catalog, ctx
                 )
                 continue
             
             # Execute
-            result = execute_sql(current_sql)
+            result = execute_sql(current_sql, user_pool)
             
             if result['success']:
                 if ctx:
@@ -455,6 +620,7 @@ async def text_to_sql(
                 
                 response = {
                     'query': query,
+                    'user_email': user_email if REQUIRE_EMAIL_AUTH else None,
                     'plan': plan,
                     'sql': result['sql'],
                     'success': True,
@@ -489,7 +655,7 @@ async def text_to_sql(
                 await ctx.info("🔧 Attempting to fix SQL with plan context...")
             
             current_sql = await fix_sql_with_context(
-                query, plan, current_sql, result['error'], catalog_content, ctx
+                query, plan, current_sql, result['error'], user_catalog, ctx
             )
         
         return json.dumps({
@@ -514,8 +680,44 @@ async def text_to_sql(
 
 
 @mcp.tool()
-async def get_schema() -> str:
-    """Get the complete database schema catalog"""
+async def get_schema(user_email: str = None) -> str:
+    """
+    Get the complete database schema catalog.
+    
+    Args:
+        user_email: Your email address (optional - uses default if not provided)
+    
+    Returns:
+        Database schema catalog in markdown format
+    """
+    # Use default email if none provided
+    if not user_email and DEFAULT_USER_EMAIL:
+        user_email = DEFAULT_USER_EMAIL
+        logger.info(f"📧 get_schema: Using default user: {user_email}")
+    
+    # If email auth is enabled, require and validate user
+    if REQUIRE_EMAIL_AUTH:
+        if not user_email:
+            return json.dumps({
+                'success': False,
+                'error': 'user_email is required when email authentication is enabled'
+            }, indent=2)
+        
+        # Validate user exists and get their catalog
+        user_info = get_user_info(user_email)
+        
+        if not user_info:
+            return json.dumps({
+                'success': False,
+                'error': f'User {user_email} not found or not active. Please complete onboarding first.',
+                'user_email': user_email
+            }, indent=2)
+        
+        # Return user's specific catalog
+        user_catalog = user_info.get('catalog_markdown', catalog_content)
+        return user_catalog if user_catalog else catalog_content
+    
+    # Legacy mode - return global catalog
     return catalog_content
 
 
@@ -544,26 +746,48 @@ async def clear_cache() -> str:
 async def health() -> str:
     """Check server health"""
     
-    db_ok = False
-    try:
-        conn = db_pool.getconn()
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        cursor.close()
-        db_pool.putconn(conn)
-        db_ok = True
-    except:
-        pass
+    admin_db_ok = False
+    user_db_ok = False
+    
+    # Check admin DB (if email auth enabled)
+    if REQUIRE_EMAIL_AUTH and admin_db_pool:
+        try:
+            conn = admin_db_pool.getconn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+            admin_db_pool.putconn(conn)
+            admin_db_ok = True
+        except:
+            pass
+    
+    # Check legacy DB (if email auth disabled)
+    if not REQUIRE_EMAIL_AUTH and db_pool:
+        try:
+            conn = db_pool.getconn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+            db_pool.putconn(conn)
+            user_db_ok = True
+        except:
+            pass
+    
+    overall_healthy = admin_db_ok if REQUIRE_EMAIL_AUTH else user_db_ok
     
     return json.dumps({
-        'status': 'healthy' if db_ok else 'degraded',
-        'database': 'healthy' if db_ok else 'unhealthy',
+        'status': 'healthy' if overall_healthy else 'degraded',
+        'admin_database': 'healthy' if admin_db_ok else ('not_applicable' if not REQUIRE_EMAIL_AUTH else 'unhealthy'),
+        'user_database': 'healthy' if user_db_ok else ('not_applicable' if REQUIRE_EMAIL_AUTH else 'unhealthy'),
         'catalog_loaded': len(catalog_content) > 100,
         'model': llm_client.model,
         'max_retries': MAX_RETRIES,
         'cache_enabled': ENABLE_QUERY_CACHE,
         'cached_queries': len(query_cache),
+        'active_user_pools': len(user_db_pools),
         'features': {
+            'email_authentication': REQUIRE_EMAIL_AUTH,
+            'multi_tenant': REQUIRE_EMAIL_AUTH,
             'two_stage_reasoning': True,
             'relationship_hints': True,
             'query_caching': ENABLE_QUERY_CACHE
@@ -577,12 +801,23 @@ async def health() -> str:
 
 if __name__ == "__main__":
     logger.info("=" * 80)
-    logger.info("🚀 Text-to-SQL MCP Server v2.0 (Two-Stage Reasoning)")
+    logger.info("🚀 Text-to-SQL MCP Server v3.0 (Multi-Tenant)")
     logger.info(f"🤖 Model: {llm_client.model}")
     logger.info(f"📄 Catalog: {CATALOG_PATH} ({len(catalog_content)} chars)")
     logger.info(f"🔄 Max Retries: {MAX_RETRIES}")
     logger.info(f"💾 Query Cache: {'Enabled' if ENABLE_QUERY_CACHE else 'Disabled'}")
-    logger.info(f"🧠 Features: Two-Stage Reasoning + Relationship Hints")
+    logger.info(f"🔐 Email Auth: {'Enabled' if REQUIRE_EMAIL_AUTH else 'Disabled (Legacy Mode)'}")
+    
+    if REQUIRE_EMAIL_AUTH:
+        logger.info(f"🏢 Admin DB: {ADMIN_DB_CONNECTION.split('@')[1] if '@' in ADMIN_DB_CONNECTION else 'configured'}")
+        logger.info(f"👥 Mode: Multi-tenant (each user uses their own database)")
+        if DEFAULT_USER_EMAIL:
+            logger.info(f"📧 Default User: {DEFAULT_USER_EMAIL}")
+    else:
+        logger.info(f"🗄️ Database: {DB_CONNECTION.split('@')[1] if '@' in DB_CONNECTION else 'configured'}")
+        logger.info(f"👤 Mode: Single-tenant (legacy)")
+    
+    logger.info(f"🧠 Features: Two-Stage Reasoning + Relationship Hints + Multi-Tenant")
     logger.info("=" * 80)
     
     try:
@@ -591,4 +826,11 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("\n👋 Shutting down...")
     finally:
-        db_pool.closeall()
+        # Close all connection pools
+        if db_pool:
+            db_pool.closeall()
+        if admin_db_pool:
+            admin_db_pool.closeall()
+        for email, pool in user_db_pools.items():
+            logger.info(f"Closing pool for {email}")
+            pool.closeall()

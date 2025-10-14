@@ -1,0 +1,19 @@
+# PostgreSQL Data Catalog Extractor Dependencies
+# Main dependency for PostgreSQL database connectivity
+psycopg2-binary>=2.9.0
+
+# Text-to-SQL MCP Server Dependencies
+openai>=1.0.0
+python-dotenv>=1.0.0
+fastmcp==2.12.1
+
+# Note: The following are built-in Python modules and don't need to be installed:
+# - json (for JSON serialization)
+# - datetime (for date/time handling)
+# - typing (for type hints)
+# - sys (for system-specific parameters and functions)
+# - random (for generating test data)
+# - asyncio (for async operations)
+# - time (for timing operations)
+# - re (for regex operations)
+# - os (for environment variables)
