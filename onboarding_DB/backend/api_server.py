@@ -18,11 +18,16 @@ from datetime import datetime
 
 from catalog_extractor import CatalogExtractor
 
+# Load environment variables first
 load_dotenv()
 
-# Logging
+# Get log level from environment (default to INFO if not set or invalid)
+LOG_LEVEL_ENV = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL_NUMERIC = getattr(logging, LOG_LEVEL_ENV, logging.INFO)
+
+# Logging configuration
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOG_LEVEL_NUMERIC,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -42,8 +47,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Admin DB connection (where we store user info)
+# Configuration from environment variables
 ADMIN_DB = os.getenv("ADMIN_DB_CONNECTION", "postgresql://testuser:testpass@localhost:5432/onboarding_admin")
+API_PORT = int(os.getenv("API_PORT", "8001"))
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 
 # ============================================================================
 # Pydantic Models
@@ -509,10 +516,12 @@ if __name__ == "__main__":
     
     logger.info("=" * 80)
     logger.info("🚀 Text2SQL Onboarding API Server")
+    logger.info(f"🌍 Environment: {ENVIRONMENT}")
     logger.info(f"📊 Admin DB: {ADMIN_DB}")
-    logger.info(f"🌐 Server: http://0.0.0.0:8001")
-    logger.info(f"📖 Docs: http://0.0.0.0:8001/docs")
+    logger.info(f"🔍 Log Level: {LOG_LEVEL_ENV}")
+    logger.info(f"🌐 Server: http://0.0.0.0:{API_PORT}")
+    logger.info(f"📖 Docs: http://0.0.0.0:{API_PORT}/docs")
     logger.info("=" * 80)
     
-    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
+    uvicorn.run(app, host="0.0.0.0", port=API_PORT, log_level=LOG_LEVEL_ENV.lower())
 

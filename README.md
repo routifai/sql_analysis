@@ -102,15 +102,29 @@ MAX_RETRIES=5
 ENABLE_QUERY_CACHE=true
 ```
 
-### 4. Setup Admin Database
+### 4. Configure Backend Environment
 
 ```bash
 cd onboarding_DB/backend
+cp env.example .env
+```
+
+Edit `.env` and configure your admin database connection:
+
+```env
+ADMIN_DB_CONNECTION=postgresql://testuser:testpass@localhost:5432/onboarding_admin
+API_PORT=8001
+LOG_LEVEL=INFO
+```
+
+### 5. Setup Admin Database
+
+```bash
 python setup_admin_db.py
 cd ../..
 ```
 
-### 5. Start the Onboarding System
+### 6. Start the Onboarding System
 
 ```bash
 cd onboarding_DB
@@ -121,7 +135,7 @@ This starts both:
 - **Backend API**: `http://localhost:8001`
 - **Frontend UI**: `http://localhost:3001`
 
-### 6. Onboard Your Database
+### 7. Onboard Your Database
 
 1. Navigate to `http://localhost:3001/onboard`
 2. Enter your email and database connection details
@@ -129,7 +143,7 @@ This starts both:
 4. Generate and review your database catalog
 5. Save to complete onboarding
 
-### 7. Start the MCP Server
+### 8. Start the MCP Server
 
 ```bash
 python mcp_server.py
