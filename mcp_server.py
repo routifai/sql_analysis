@@ -35,7 +35,7 @@ REQUIRE_EMAIL_AUTH = os.getenv("REQUIRE_EMAIL_AUTH", "true").lower() == "true"
 
 # Default user email (for development/testing)
 # Set this to your email if you don't want to pass it with every request
-DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "abc@gmail.com")
+DEFAULT_USER_EMAIL = os.getenv("DEFAULT_USER_EMAIL", "abc @gmail.com")
 
 # Logging
 logging.basicConfig(

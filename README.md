@@ -1,20 +1,48 @@
-# AnalyticsSQL - Text-to-SQL MCP Server
+# AnalyticsSQL - Database Execution MCP Server
 
-A powerful Model Context Protocol (MCP) server that converts natural language queries to SQL using OpenAI with automatic error correction and multi-tenant support.
+A clean Model Context Protocol (MCP) server that provides secure database execution services with multi-tenant support. Your LLM handles text-to-SQL conversion, while this server handles database operations.
 
 ## 🚀 Features
 
-- **Natural Language to SQL**: Convert questions like "Show me top 5 users by order count" into SQL
-- **Automatic Error Correction**: When SQL fails, the server automatically fixes it using OpenAI
+- **Clean Architecture**: Your LLM handles text-to-SQL, MCP server handles database execution
 - **Multi-Tenant Support**: Each user queries their own database with email-based authentication
-- **Real-time Feedback**: Live progress updates during query processing
-- **Retry Logic**: Up to 5 attempts to get the query right
-- **Security**: Only SELECT queries allowed, dangerous keywords blocked
+- **Security First**: Only SELECT and WITH queries allowed, dangerous keywords blocked
+- **Schema Access**: Get database schema/catalog for your LLM to use
+- **Connection Pooling**: Efficient database connection management per user
 - **FastMCP Integration**: Clean, production-ready server implementation
 - **PostgreSQL Support**: Works with your existing PostgreSQL database
+- **No LLM Dependencies**: Server focuses purely on database operations
 
 ## 🏗️ Architecture
 
+**Clean Separation of Concerns:**
+
+```
+┌─────────────────────────────────────┐
+│   Your LLM (Claude, GPT, etc.)     │  Handles text-to-SQL conversion
+│   - Natural language processing     │
+│   - SQL generation                  │
+│   - Error handling & retry logic    │
+└────────────┬────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────┐
+│   MCP Server (FastMCP)              │  Database execution service
+│   - execute_query(sql, user_email)  │
+│   - get_schema(user_email)          │
+│   - User authentication             │
+│   - Connection pooling              │
+└────────────┬────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────┐
+│   User's Database (PostgreSQL)      │  User's actual data
+│   - Secure query execution          │
+│   - Schema validation               │
+└─────────────────────────────────────┘
+```
+
+**Onboarding System:**
 ```
 ┌─────────────────────────────────────┐
 │   Frontend (Next.js - Port 3001)   │  Users onboard their databases
@@ -36,22 +64,14 @@ A powerful Model Context Protocol (MCP) server that converts natural language qu
 │   - User connection credentials     │
 │   - Database catalogs               │
 └─────────────────────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────────┐
-│   MCP Server (FastMCP)              │  Text-to-SQL queries
-│   - Email authentication            │
-│   - User-specific DB pools          │
-│   - Query generation & execution    │
-└─────────────────────────────────────┘
 ```
 
 ## 📋 Prerequisites
 
 - Python 3.8+
 - PostgreSQL database
-- OpenAI API key
 - macOS, Linux, or Windows with PostgreSQL installed
+- Your preferred LLM (Claude, GPT, etc.) for text-to-SQL conversion
 
 ## 🛠️ Quick Start
 
@@ -90,16 +110,12 @@ ADMIN_DB_CONNECTION=postgresql://testuser:testpass@localhost:5432/onboarding_adm
 DEFAULT_USER_EMAIL=your.email@example.com
 
 # ============================================================================
-# LLM Configuration
+# Database Configuration
 # ============================================================================
-OPENAI_API_KEY=sk-your-openai-key-here
-LLM_MODEL=gpt-4o-mini
-
-# ============================================================================
-# Query Configuration
-# ============================================================================
-MAX_RETRIES=5
-ENABLE_QUERY_CACHE=true
+USER_CONNECTIONS_TABLE=db_connection_infos
+AUDIT_LOG_TABLE=onboarding_audit_log
+MAX_RESULT_ROWS=1000
+QUERY_TIMEOUT=30
 ```
 
 ### 4. Configure Onboarding System
@@ -157,25 +173,58 @@ This starts both:
 
 ### 8. Start the MCP Server
 
+**New Clean Architecture (Recommended):**
+```bash
+python mcp_server_v2.py
+```
+
+**Legacy Architecture (for comparison):**
 ```bash
 python mcp_server.py
 ```
 
-## 🛠️ Available Tools
+## 🛠️ Available Tools (v2 - Clean Architecture)
 
-### `text_to_sql(query, execute=True, limit=100)`
-Main tool for natural language to SQL conversion with auto-retry.
+### `execute_query(sql, user_email=None, limit=None)`
+Execute a SQL query on the user's database.
 
-**Examples**:
-- "Show me users who have placed orders"
-- "What's the total revenue by category?"
-- "Top 5 products by price"
+**Parameters:**
+- `sql`: The SQL query to execute (SELECT or WITH statements only)
+- `user_email`: User's email for authentication (optional if DEFAULT_USER_EMAIL is set)
+- `limit`: Maximum number of rows to return
 
-### `get_schema()`
-Get the complete database schema catalog in markdown format.
+**Example:**
+```python
+# Your LLM generates SQL, then execute it
+result = execute_query(
+    sql="SELECT * FROM users WHERE created_at > '2024-01-01' LIMIT 10",
+    user_email="user@example.com"
+)
+```
+
+### `get_schema(user_email=None)`
+Get the database schema/catalog for your LLM to use.
+
+**Example:**
+```python
+# Get schema for your LLM to understand the database
+schema = get_schema(user_email="user@example.com")
+# schema["schema"] contains the markdown catalog
+```
 
 ### `health()`
 Check server and database health status.
+
+## 🛠️ Legacy Tools (v1 - Anti-pattern)
+
+### `text_to_sql(query, user_email=None, execute=True, limit=100)`
+⚠️ **Deprecated**: This creates an anti-pattern where the MCP server calls an LLM.
+
+**Why it's bad:**
+- Double LLM calls (your LLM → MCP server's LLM)
+- Unnecessary complexity and overhead
+- Takes control away from your LLM
+- Higher latency and costs
 
 ## 🔧 Configuration
 
@@ -186,10 +235,10 @@ Check server and database health status.
 | `REQUIRE_EMAIL_AUTH` | Enable multi-tenant email auth | `true` | Yes |
 | `ADMIN_DB_CONNECTION` | Admin database connection string | - | Yes (if auth enabled) |
 | `DEFAULT_USER_EMAIL` | Default user email (development) | - | No |
-| `OPENAI_API_KEY` | OpenAI API key | - | Yes |
-| `LLM_MODEL` | OpenAI model to use | `gpt-4o-mini` | No |
-| `MAX_RETRIES` | Max retry attempts for SQL fixes | `5` | No |
-| `ENABLE_QUERY_CACHE` | Enable query result caching | `true` | No |
+| `USER_CONNECTIONS_TABLE` | Table name for user connections | `db_connection_infos` | No |
+| `AUDIT_LOG_TABLE` | Table name for audit logging | `onboarding_audit_log` | No |
+| `MAX_RESULT_ROWS` | Maximum rows to return per query | `1000` | No |
+| `QUERY_TIMEOUT` | Query timeout in seconds | `30` | No |
 
 ### Email Authentication
 
