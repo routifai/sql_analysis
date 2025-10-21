@@ -12,6 +12,47 @@ A clean Model Context Protocol (MCP) server that provides secure database execut
 - **FastMCP Integration**: Clean, production-ready server implementation
 - **PostgreSQL Support**: Works with your existing PostgreSQL database
 - **No LLM Dependencies**: Server focuses purely on database operations
+- **🆕 MCP Resources**: Industry-standard schema exposure with automatic context loading
+- **🆕 Defense in Depth**: Multi-layer security validation for enhanced protection
+
+## 🆕 MCP Resources Implementation (v3)
+
+**Enhanced with Industry-Standard MCP Resources:**
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   CLAUDE DESKTOP                    │
+│  (MCP Client - requests resources & calls tools) │
+└────────────────┬────────────────────────────────────┘
+                 │
+                 │ MCP Protocol (JSON-RPC)
+                 │
+┌────────────────▼────────────────────────────────────┐
+│              MCP SERVER V3                           │
+│                                                     │
+│  📋 RESOURCES (Context):                           │
+│     └─ database://user@email.com/schema           │
+│        └─ Returns: Catalog + allowed_tables        │
+│                                                     │
+│     └─ database://user@email.com/tables            │
+│        └─ Returns: Table list with URIs           │
+│                                                     │
+│     └─ database://user@email.com/table/users       │
+│        └─ Returns: Columns, types, constraints     │
+│                                                     │
+│  🔧 TOOLS (Actions):                               │
+│     └─ execute_query(sql, user_email, limit)      │
+│        └─ Validates against allowed_tables[]       │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+**Key Benefits:**
+- ⚡ **Faster responses** - Schema pre-loaded as context
+- 🧠 **Automatic context** - No manual schema calls needed
+- 🛡️ **Defense in depth** - Security validation at multiple layers
+- 📊 **Better performance** - Resources cached by MCP client
+- 🏗️ **Industry standard** - Follows Microsoft, Oracle, Google patterns
 
 ## 🏗️ Architecture
 
